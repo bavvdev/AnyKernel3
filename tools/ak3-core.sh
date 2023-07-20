@@ -1,10 +1,9 @@
 ### AnyKernel methods (DO NOT CHANGE)
 ## osm0sis @ xda-developers
 
-[ "$OUTFD" ] || OUTFD=$1;
+OUTFD=$1;
 
 # set up working directory variables
-[ "$AKHOME" ] && home=$AKHOME;
 [ "$home" ] || home=$PWD;
 bootimg=$home/boot.img;
 bin=$home/tools;
@@ -238,7 +237,7 @@ repack_ramdisk() {
 
 # flash_boot (build, sign and write image only)
 flash_boot() {
-  local varlist i kernel ramdisk fdt cmdline comp part0 part1 nocompflag signfail pk8 cert avbtype;
+  local varlist i kernel ramdisk fdt cmdline comp part0 part1 needskernelpatch nocompflag signfail pk8 cert avbtype;
 
   cd $split_img;
   if [ -f "$bin/mkimage" ]; then
@@ -328,45 +327,28 @@ flash_boot() {
             $comp -dc $kernel > kernel;
           fi;
           # legacy SAR kernel string skip_initramfs -> want_initramfs
-          $bin/magiskboot hexpatch kernel 736B69705F696E697472616D6673 77616E745F696E697472616D6673;
-          if [ "$(file_getprop $home/anykernel.sh do.modules)" == 1 ] && [ "$(file_getprop $home/anykernel.sh do.systemless)" == 1 ]; then
+          $bin/magiskboot hexpatch kernel 736B69705F696E697472616D6673 77616E745F696E697472616D6673 && needskernelpatch=1;
+          if [ "$(file_getprop $home/anykernel.sh do.systemless)" == 1 ]; then
             strings kernel 2>/dev/null | grep -E -m1 'Linux version.*#' > $home/vertmp;
           fi;
-          if [ "$comp" ]; then
-            $bin/magiskboot compress=$comp kernel kernel.$comp;
-            if [ $? != 0 ] && $comp --help 2>/dev/null; then
-              echo "Attempting kernel repack with busybox $comp..." >&2;
-              $comp -9c kernel > kernel.$comp;
+          if [ "$needskernelpatch" ]; then
+            if [ "$comp" ]; then
+              $bin/magiskboot compress=$comp kernel kernel.$comp;
+              if [ $? != 0 ] && $comp --help 2>/dev/null; then
+                echo "Attempting kernel repack with busybox $comp..." >&2;
+                $comp -9c kernel > kernel.$comp;
+              fi;
+              mv -f kernel.$comp kernel;
             fi;
-            mv -f kernel.$comp kernel;
+          else
+            echo "Restoring untouched new kernel since no patching required..." >&2;
+            cp -f $kernel kernel;
           fi;
           [ ! -f .magisk ] && $bin/magiskboot cpio ramdisk.cpio "extract .backup/.magisk .magisk";
           export $(cat .magisk);
           for fdt in dtb extra kernel_dtb recovery_dtbo; do
             [ -f $fdt ] && $bin/magiskboot dtb $fdt patch; # remove dtb verity/avb
           done;
-        elif [ -d /data/data/me.weishu.kernelsu ] && [ "$(file_getprop $home/anykernel.sh do.modules)" == 1 ] && [ "$(file_getprop $home/anykernel.sh do.systemless)" == 1 ]; then
-          ui_print " " "KernelSU detected! Setting up for kernel helper module...";
-          comp=$($bin/magiskboot decompress kernel 2>&1 | grep -vE 'raw|zimage' | sed -n 's;.*\[\(.*\)\];\1;p');
-          ($bin/magiskboot split $kernel || $bin/magiskboot decompress $kernel kernel) 2>/dev/null;
-          if [ $? != 0 -a "$comp" ] && $comp --help 2>/dev/null; then
-            echo "Attempting kernel unpack with busybox $comp..." >&2;
-            $comp -dc $kernel > kernel;
-          fi;
-          if strings kernel 2>/dev/null | grep -q -E '^/data/adb/ksud$'; then
-            touch $home/kernelsu_patched;
-            strings kernel 2>/dev/null | grep -E -m1 'Linux version.*#' > $home/vertmp;
-          else
-            ui_print " " "Warning: No KernelSU support detected in kernel!";
-          fi;
-          if [ "$comp" ]; then
-            $bin/magiskboot compress=$comp kernel kernel.$comp;
-            if [ $? != 0 ] && $comp --help 2>/dev/null; then
-              echo "Attempting kernel repack with busybox $comp..." >&2;
-              $comp -9c kernel > kernel.$comp;
-            fi;
-            mv -f kernel.$comp kernel;
-          fi;
         else
           case $kernel in
             *-dtb) rm -f kernel_dtb;;
@@ -406,7 +388,7 @@ flash_boot() {
       *recovery*|*SOS*) avbtype=recovery;;
       *) avbtype=boot;;
     esac;
-    if [ -f /system/bin/dalvikvm ] && [ "$(/system/bin/dalvikvm -Xnoimage-dex2oat -cp $bin/boot_signer-dexed.jar com.android.verity.BootSignature -verify boot.img 2>&1 | grep VALID)" ]; then
+    if [ "$(/system/bin/dalvikvm -Xnoimage-dex2oat -cp $bin/boot_signer-dexed.jar com.android.verity.BootSignature -verify boot.img 2>&1 | grep VALID)" ]; then
       echo "Signing with AVBv1..." >&2;
       /system/bin/dalvikvm -Xnoimage-dex2oat -cp $bin/boot_signer-dexed.jar com.android.verity.BootSignature /$avbtype boot-new.img $pk8 $cert boot-new-signed.img;
     fi;
@@ -492,8 +474,6 @@ flash_generic() {
         else
           echo "Removing any existing $1_ak3..." >&2;
           $bin/lptools_static remove $1_ak3;
-          echo "Clearing any merged cow partitions..." >&2;
-          $bin/lptools_static clear-cow;
           echo "Attempting to create $1_ak3..." >&2;
           if $bin/lptools_static create $1_ak3 $imgsz; then
             echo "Replacing $1$slot with $1_ak3..." >&2;
